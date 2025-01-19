@@ -204,33 +204,42 @@ class TusClient extends TusClientBase {
   try {
     // Vor jedem Chunk-Upload den aktuellen Server-Offset abfragen
     final currentOffset = await _getOffset();
+    log('Checking current offset - Client: $_offset, Server: $currentOffset');
+    
     if (currentOffset != _offset) {
-      print('Resynchronizing offset: Client: $_offset, Server: $currentOffset');
+      log('Resynchronizing offset - Client: $_offset, Server: $currentOffset');
       _offset = currentOffset;
     }
 
+    log('Preparing upload request for chunk at offset: $_offset');
     final request = http.Request("PATCH", _uploadUrl as Uri)
       ..headers.addAll(uploadHeaders)
       ..bodyBytes = await _getData();
       
     // Upload-ID oder Session-ID hinzufügen falls vorhanden
     if (_response?.headers["upload-id"] != null) {
+      log('Found upload-id: ${_response!.headers["upload-id"]}');
       request.headers["upload-id"] = _response!.headers["upload-id"]!;
     }
 
+    log('Sending chunk request...');
     _response = await client.send(request);
 
     if (_response != null) {
+      log('Got response with status: ${_response!.statusCode}');
+      
       // Response-Stream komplett einlesen
       final bytes = await _response!.stream.toBytes();
+      log('Response body size: ${bytes.length} bytes');
       
       if (_response!.statusCode == 409) {
-        // Konflikt - Offset neu synchronisieren
+        log('Received conflict (409) - checking server offset');
         _offset = await _getOffset();
         throw StateError("Offset mismatch, retrying with correct offset");
       }
 
       if (!(_response!.statusCode >= 200 && _response!.statusCode < 300)) {
+        log('Error response: ${_response!.statusCode}');
         throw ProtocolException(
           "Error while uploading file",
           _response!.statusCode,
@@ -238,7 +247,10 @@ class TusClient extends TusClientBase {
       }
 
       int? serverOffset = _parseOffset(_response!.headers["upload-offset"]);
+      log('Server returned offset: $serverOffset');
+      
       if (serverOffset == null) {
+        log('No valid offset in response headers');
         throw ProtocolException(
           "Response to PATCH request contains no or invalid Upload-Offset header"
         );
@@ -246,37 +258,55 @@ class TusClient extends TusClientBase {
 
       // Offset-Validierung
       if (_offset != serverOffset) {
-        print('Offset mismatch - Client: $_offset, Server: $serverOffset');
+        log('Offset mismatch detected - Client: $_offset, Server: $serverOffset');
         _offset = serverOffset;  // Offset synchronisieren
         throw StateError("Offset mismatch, retrying with correct offset");
       }
 
       // Progress und Completion
       if (!_pauseUpload) {
-        final progress = (_offset / totalBytes * 100).clamp(0, 100);
+        // Explizite Konvertierung zu double
+        final progress = ((_offset.toDouble() / totalBytes.toDouble()) * 100.0).clamp(0.0, 100.0);
+        log('Calculated progress: $progress%');
+        
         if (onProgress != null) {
+          double speedInBytesPerSecond = uploadSpeed != null 
+            ? uploadSpeed! * 1000000.0 
+            : 1000000.0;
+          
+          log('Upload speed: ${speedInBytesPerSecond / 1000000.0} MB/s');
+          
           final estimate = Duration(
-            seconds: ((totalBytes - _offset) / 
-              (uploadSpeed ?? 1.0 * 1000000)).round()
+            seconds: ((totalBytes - _offset) / speedInBytesPerSecond).round()
           );
+          log('Estimated time remaining: ${estimate.inSeconds}s');
+          
           onProgress(progress, estimate);
         }
 
         if (_offset >= totalBytes) {
+          log('Upload completed! Total bytes: $totalBytes');
           await onCompleteUpload();
           if (onComplete != null) {
+            log('Calling onComplete callback');
             onComplete();
           }
+        } else {
+          log('Continuing upload - $_offset/$totalBytes bytes uploaded');
         }
       }
 
     } else {
+      log('No response received from server');
       throw ProtocolException("Error getting Response from server");
     }
 
-  } catch (e) {
+  } catch (e, stackTrace) {
+    log('Error during upload: $e');
+    log('Stack trace: $stackTrace');
+
     if (e is StateError) {
-      // Bei Offset-Mismatches sofort retry
+      log('Retrying immediately due to offset mismatch');
       return await _performUpload(
         onComplete: onComplete,
         onProgress: onProgress,
@@ -287,7 +317,10 @@ class TusClient extends TusClientBase {
       );
     }
 
-    if (_actualRetry >= retries) rethrow;
+    if (_actualRetry >= retries) {
+      log('Maximum retries reached ($retries), giving up');
+      rethrow;
+    }
     
     final waitInterval = retryScale.getInterval(
       _actualRetry,
@@ -295,8 +328,8 @@ class TusClient extends TusClientBase {
     );
     _actualRetry += 1;
     
-    print('Upload failed (attempt $_actualRetry): $e');
-    log('Failed to upload,try: $_actualRetry, interval: $waitInterval');
+    log('Upload failed (attempt $_actualRetry of $retries): $e');
+    log('Waiting for $waitInterval before retry');
     
     await Future.delayed(waitInterval);
     
