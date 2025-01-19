@@ -202,47 +202,33 @@ class TusClient extends TusClientBase {
   required int totalBytes,
 }) async {
   try {
+    // Vor jedem Chunk-Upload den aktuellen Server-Offset abfragen
+    final currentOffset = await _getOffset();
+    if (currentOffset != _offset) {
+      print('Resynchronizing offset: Client: $_offset, Server: $currentOffset');
+      _offset = currentOffset;
+    }
+
     final request = http.Request("PATCH", _uploadUrl as Uri)
       ..headers.addAll(uploadHeaders)
       ..bodyBytes = await _getData();
+      
+    // Upload-ID oder Session-ID hinzufügen falls vorhanden
+    if (_response?.headers["upload-id"] != null) {
+      request.headers["upload-id"] = _response!.headers["upload-id"]!;
+    }
+
     _response = await client.send(request);
 
     if (_response != null) {
-      await _response?.stream.listen(
-        (newBytes) {
-          if (_actualRetry != 0) _actualRetry = 0;
-        },
-        onDone: () async {
-          if (onProgress != null && !_pauseUpload) {
-            // Total byte sent
-            final totalSent = min(_offset + maxChunkSize, totalBytes); 
-            double _workedUploadSpeed = 1.0;
-
-            if (uploadSpeed != null) {
-              _workedUploadSpeed = uploadSpeed! * 1000000;
-            } else {
-              _workedUploadSpeed = totalSent / uploadStopwatch.elapsedMilliseconds;
-            }
-
-            final remainData = totalBytes - totalSent;
-            final estimate = Duration(
-              seconds: (remainData / _workedUploadSpeed).round(),
-            );
-
-            final progress = totalSent / totalBytes * 100;
-            onProgress((progress).clamp(0, 100), estimate);
-            
-            // Hier die Completion-Prüfung hinzugefügt
-            if (totalSent >= totalBytes && !_pauseUpload) {
-              await this.onCompleteUpload();
-              if (onComplete != null) {
-                onComplete();
-              }
-            }
-          }
-          _actualRetry = 0;
-        },
-      ).asFuture();
+      // Response-Stream komplett einlesen
+      final bytes = await _response!.stream.toBytes();
+      
+      if (_response!.statusCode == 409) {
+        // Konflikt - Offset neu synchronisieren
+        _offset = await _getOffset();
+        throw StateError("Offset mismatch, retrying with correct offset");
+      }
 
       if (!(_response!.statusCode >= 200 && _response!.statusCode < 300)) {
         throw ProtocolException(
@@ -254,25 +240,66 @@ class TusClient extends TusClientBase {
       int? serverOffset = _parseOffset(_response!.headers["upload-offset"]);
       if (serverOffset == null) {
         throw ProtocolException(
-            "Response to PATCH request contains no or invalid Upload-Offset header");
+          "Response to PATCH request contains no or invalid Upload-Offset header"
+        );
       }
+
+      // Offset-Validierung
       if (_offset != serverOffset) {
-        throw ProtocolException(
-            "Response contains different Upload-Offset value ($serverOffset) than expected ($_offset)");
+        print('Offset mismatch - Client: $_offset, Server: $serverOffset');
+        _offset = serverOffset;  // Offset synchronisieren
+        throw StateError("Offset mismatch, retrying with correct offset");
       }
+
+      // Progress und Completion
+      if (!_pauseUpload) {
+        final progress = (_offset / totalBytes * 100).clamp(0, 100);
+        if (onProgress != null) {
+          final estimate = Duration(
+            seconds: ((totalBytes - _offset) / 
+              (uploadSpeed ?? 1.0 * 1000000)).round()
+          );
+          onProgress(progress, estimate);
+        }
+
+        if (_offset >= totalBytes) {
+          await onCompleteUpload();
+          if (onComplete != null) {
+            onComplete();
+          }
+        }
+      }
+
     } else {
       throw ProtocolException("Error getting Response from server");
     }
+
   } catch (e) {
+    if (e is StateError) {
+      // Bei Offset-Mismatches sofort retry
+      return await _performUpload(
+        onComplete: onComplete,
+        onProgress: onProgress,
+        uploadHeaders: uploadHeaders,
+        client: client,
+        uploadStopwatch: uploadStopwatch,
+        totalBytes: totalBytes,
+      );
+    }
+
     if (_actualRetry >= retries) rethrow;
+    
     final waitInterval = retryScale.getInterval(
       _actualRetry,
       retryInterval,
     );
     _actualRetry += 1;
+    
+    print('Upload failed (attempt $_actualRetry): $e');
     log('Failed to upload,try: $_actualRetry, interval: $waitInterval');
-    print(e);
+    
     await Future.delayed(waitInterval);
+    
     return await _performUpload(
       onComplete: onComplete,
       onProgress: onProgress,
