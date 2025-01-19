@@ -270,7 +270,8 @@ class TusClient extends TusClientBase {
       retryInterval,
     );
     _actualRetry += 1;
-    log('Failed to upload,try: $_actualRetry, interval: $waitInterval', e);
+    log('Failed to upload,try: $_actualRetry, interval: $waitInterval');
+    print(e);
     await Future.delayed(waitInterval);
     return await _performUpload(
       onComplete: onComplete,
