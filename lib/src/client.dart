@@ -194,100 +194,94 @@ class TusClient extends TusClientBase {
   }
 
   Future<void> _performUpload({
-    Function(double, Duration)? onProgress,
-    Function()? onComplete,
-    required Map<String, String> uploadHeaders,
-    required http.Client client,
-    required Stopwatch uploadStopwatch,
-    required int totalBytes,
-  }) async {
-    try {
-      final request = http.Request("PATCH", _uploadUrl as Uri)
-        ..headers.addAll(uploadHeaders)
-        ..bodyBytes = await _getData();
-      _response = await client.send(request);
+  Function(double, Duration)? onProgress,
+  Function()? onComplete,
+  required Map<String, String> uploadHeaders,
+  required http.Client client,
+  required Stopwatch uploadStopwatch,
+  required int totalBytes,
+}) async {
+  try {
+    final request = http.Request("PATCH", _uploadUrl as Uri)
+      ..headers.addAll(uploadHeaders)
+      ..bodyBytes = await _getData();
+    _response = await client.send(request);
 
-      if (_response != null) {
-        _response?.stream.listen(
-          (newBytes) {
-            if (_actualRetry != 0) _actualRetry = 0;
-          },
-          onDone: () {
-            if (onProgress != null && !_pauseUpload) {
-              // Total byte sent
-              final totalSent = _offset + maxChunkSize;
-              double _workedUploadSpeed = 1.0;
+    if (_response != null) {
+      await _response?.stream.listen(
+        (newBytes) {
+          if (_actualRetry != 0) _actualRetry = 0;
+        },
+        onDone: () async {  // Hier async hinzugefügt
+          if (onProgress != null && !_pauseUpload) {
+            // Total byte sent
+            final totalSent = min(_offset + maxChunkSize, totalBytes); // min hinzugefügt
+            double _workedUploadSpeed = 1.0;
 
-              // If upload speed != null, it means it has been measured
-              if (uploadSpeed != null) {
-                // Multiplied by 10^6 to convert from Mb/s to b/s
-                _workedUploadSpeed = uploadSpeed! * 1000000;
-              } else {
-                _workedUploadSpeed =
-                    totalSent / uploadStopwatch.elapsedMilliseconds;
-              }
-
-              // The data that hasn't been sent yet
-              final remainData = totalBytes - totalSent;
-
-              // The time remaining to finish the upload
-              final estimate = Duration(
-                seconds: (remainData / _workedUploadSpeed).round(),
-              );
-
-              final progress = totalSent / totalBytes * 100;
-              onProgress((progress).clamp(0, 100), estimate);
-              _actualRetry = 0;
+            if (uploadSpeed != null) {
+              _workedUploadSpeed = uploadSpeed! * 1000000;
+            } else {
+              _workedUploadSpeed = totalSent / uploadStopwatch.elapsedMilliseconds;
             }
-          },
-        );
 
-        // check if correctly uploaded
-        if (!(_response!.statusCode >= 200 && _response!.statusCode < 300)) {
-          throw ProtocolException(
-            "Error while uploading file",
-            _response!.statusCode,
-          );
-        }
+            final remainData = totalBytes - totalSent;
+            final estimate = Duration(
+              seconds: (remainData / _workedUploadSpeed).round(),
+            );
 
-        int? serverOffset = _parseOffset(_response!.headers["upload-offset"]);
-        if (serverOffset == null) {
-          throw ProtocolException(
-              "Response to PATCH request contains no or invalid Upload-Offset header");
-        }
-        if (_offset != serverOffset) {
-          throw ProtocolException(
-              "Response contains different Upload-Offset value ($serverOffset) than expected ($_offset)");
-        }
-
-        if (_offset == totalBytes && !_pauseUpload) {
-          this.onCompleteUpload();
-          if (onComplete != null) {
-            onComplete();
+            final progress = totalSent / totalBytes * 100;
+            onProgress((progress).clamp(0, 100), estimate);
+            
+            // Hier die Completion-Prüfung hinzugefügt
+            if (totalSent >= totalBytes && !_pauseUpload) {
+              await this.onCompleteUpload();
+              if (onComplete != null) {
+                onComplete();
+              }
+            }
           }
-        }
-      } else {
-        throw ProtocolException("Error getting Response from server");
+          _actualRetry = 0;
+        },
+      ).asFuture(); // .asFuture() hinzugefügt um auf Stream-Completion zu warten
+
+      if (!(_response!.statusCode >= 200 && _response!.statusCode < 300)) {
+        throw ProtocolException(
+          "Error while uploading file",
+          _response!.statusCode,
+        );
       }
-    } catch (e) {
-      if (_actualRetry >= retries) rethrow;
-      final waitInterval = retryScale.getInterval(
-        _actualRetry,
-        retryInterval,
-      );
-      _actualRetry += 1;
-      log('Failed to upload,try: $_actualRetry, interval: $waitInterval');
-      await Future.delayed(waitInterval);
-      return await _performUpload(
-        onComplete: onComplete,
-        onProgress: onProgress,
-        uploadHeaders: uploadHeaders,
-        client: client,
-        uploadStopwatch: uploadStopwatch,
-        totalBytes: totalBytes,
-      );
+
+      int? serverOffset = _parseOffset(_response!.headers["upload-offset"]);
+      if (serverOffset == null) {
+        throw ProtocolException(
+            "Response to PATCH request contains no or invalid Upload-Offset header");
+      }
+      if (_offset != serverOffset) {
+        throw ProtocolException(
+            "Response contains different Upload-Offset value ($serverOffset) than expected ($_offset)");
+      }
+    } else {
+      throw ProtocolException("Error getting Response from server");
     }
+  } catch (e) {
+    if (_actualRetry >= retries) rethrow;
+    final waitInterval = retryScale.getInterval(
+      _actualRetry,
+      retryInterval,
+    );
+    _actualRetry += 1;
+    log('Failed to upload,try: $_actualRetry, interval: $waitInterval');
+    await Future.delayed(waitInterval);
+    return await _performUpload(
+      onComplete: onComplete,
+      onProgress: onProgress,
+      uploadHeaders: uploadHeaders,
+      client: client,
+      uploadStopwatch: uploadStopwatch,
+      totalBytes: totalBytes,
+    );
   }
+}
 
   /// Pause the current upload
   Future<bool> pauseUpload() async {
