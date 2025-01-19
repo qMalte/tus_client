@@ -212,10 +212,10 @@ class TusClient extends TusClientBase {
         (newBytes) {
           if (_actualRetry != 0) _actualRetry = 0;
         },
-        onDone: () async {  // Hier async hinzugefügt
+        onDone: () async {
           if (onProgress != null && !_pauseUpload) {
             // Total byte sent
-            final totalSent = min(_offset + maxChunkSize, totalBytes); // min hinzugefügt
+            final totalSent = min(_offset + maxChunkSize, totalBytes); 
             double _workedUploadSpeed = 1.0;
 
             if (uploadSpeed != null) {
@@ -242,7 +242,7 @@ class TusClient extends TusClientBase {
           }
           _actualRetry = 0;
         },
-      ).asFuture(); // .asFuture() hinzugefügt um auf Stream-Completion zu warten
+      ).asFuture();
 
       if (!(_response!.statusCode >= 200 && _response!.statusCode < 300)) {
         throw ProtocolException(
@@ -270,7 +270,7 @@ class TusClient extends TusClientBase {
       retryInterval,
     );
     _actualRetry += 1;
-    log('Failed to upload,try: $_actualRetry, interval: $waitInterval');
+    log('Failed to upload,try: $_actualRetry, interval: $waitInterval', e);
     await Future.delayed(waitInterval);
     return await _performUpload(
       onComplete: onComplete,
